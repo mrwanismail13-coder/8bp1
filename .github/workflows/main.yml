@@ -1,9 +1,15 @@
 name: Build Browser to EXE
-on: [push, workflow_dispatch]
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -11,18 +17,20 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-cache: 'pip'
+        python-version: '3.12'
 
     - name: Install Dependencies
       run: |
-        pip install PyQt5 PyQtWebEngine pyinstaller
+        python -m pip install --upgrade pip
+        pip install opencv-python numpy mss pyinstaller
 
     - name: Build EXE
       run: |
-        pyinstaller --onedir --windowed browser.py
+        # هنا قمنا بتغيير الاسم ليتطابق مع ملفك الفعلي وتجنب الخطأ السابق
+        pyinstaller --onefile --noconsole ballpool.py
 
     - name: Upload Result
       uses: actions/upload-artifact@v4
       with:
-        name: MyBrowser-EXE
-        path: dist/
+        name: Billiards-Tool-EXE
+        path: dist/ballpool.exe
