@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-latest  # سيرفر ويندوز مخصص لبناء ملفات الـ EXE المتوافقة
 
     steps:
     - name: Checkout code
@@ -22,11 +22,13 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install opencv-python numpy mss pyinstaller
+        # تثبيت كافة المكتبات الأساسية ومكتبات التحكم بويندوز والأزرار التي أضفناها للكود
+        pip install opencv-python numpy mss pyinstaller keyboard pywin32
 
     - name: Build EXE
       run: |
-        # هنا قمنا بتغيير الاسم ليتطابق مع ملفك الفعلي وتجنب الخطأ السابق
+        # تحويل ملف ballpool.py إلى ملف تنفيذي واحد مدمج (--onefile)
+        # وإخفاء نافذة الدوس السوداء (--noconsole) ليعمل كـ Overlay احترافي
         pyinstaller --onefile --noconsole ballpool.py
 
     - name: Upload Result
