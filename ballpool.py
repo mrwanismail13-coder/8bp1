@@ -9,10 +9,11 @@ import math
 import keyboard
 import sys
 
-# إعداد أبعاد الشاشة بالكامل
+# الحصول على أبعاد الشاشة الحالية
 SCREEN_WIDTH = win32api.GetSystemMetrics(0)
 SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
+# الألوان المستخدمة في الرسم العائم
 TRANSPARENT_COLOR = (0, 0, 0)
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
@@ -29,11 +30,12 @@ def is_white_ball(roi):
     if roi is None or roi.size == 0:
         return False
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    lower_white = np.array([0, 0, 180]) # توسيع النطاق لضمان لقطة دقيقة
-    upper_white = np.array([180, 40, 255])
+    # نطاق دقيق جداً لعزل اللون الأبيض الخاص بالكرة البيضاء وسط الإضاءة العالية
+    lower_white = np.array([0, 0, 190])
+    upper_white = np.array([180, 45, 255])
     mask = cv2.inRange(hsv, lower_white, upper_white)
     white_ratio = np.sum(mask == 255) / mask.size
-    return white_ratio > 0.45
+    return white_ratio > 0.50
 
 def get_ghost_ball_position(target_ball, pocket, ball_radius):
     dx = target_ball[0] - pocket[0]
@@ -47,10 +49,8 @@ def get_ghost_ball_position(target_ball, pocket, ball_radius):
     return (int(ghost_x), int(ghost_y))
 
 def detect_table_bounds(frame):
-    """التعرف التلقائي على حدود طاولة البلياردو (الخضراء أو الزرقاء)"""
+    """رصد حدود الطاولة الزرقاء أو الخضراء بدقة بالاعتماد على المساحة اللونية السائدة"""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # نطاق الألوان لطاولات البلياردو (الأزرق والأخضر)
     lower_table = np.array([35, 40, 40])
     upper_table = np.array([130, 255, 255])
     
@@ -58,13 +58,11 @@ def detect_table_bounds(frame):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if contours:
-        # أخذ أكبر مساحة تم العثور عليها وهي الطاولة بالتأكيد
         largest_contour = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest_contour) > 50000: # حد أدنى للتأكد أنها الطاولة
+        if cv2.contourArea(largest_contour) > 40000:
             x, y, w, h = cv2.boundingRect(largest_contour)
             return {"top": y, "left": x, "width": w, "height": h}
             
-    # إعدادات افتراضية كاملة في حال لم يتم رصد الطاولة في أول جزء من الثانية
     return {"top": 0, "left": 0, "width": SCREEN_WIDTH, "height": SCREEN_HEIGHT}
 
 def main():
@@ -101,50 +99,48 @@ def main():
             screen.fill(TRANSPARENT_COLOR)
             mx, my = win32api.GetCursorPos()
 
-            # 1. التقاط كامل الشاشة لتحليل مكان الطاولة أولاً
+            # التقاط الشاشة
             full_img = np.array(sct.grab(full_monitor))
             full_frame = cv2.cvtColor(full_img, cv2.COLOR_BGRA2BGR)
             
-            # تحديد إحداثيات الطاولة فقط
             table = detect_table_bounds(full_frame)
-            
-            # قص صورة الطاولة للعمل عليها بشكل مخصص وسريع جداً
             table_frame = full_frame[table["top"]:table["top"]+table["height"], table["left"]:table["left"]+table["width"]]
             
             if table_frame.size == 0:
                 continue
 
+            # تحويل الصورة إلى تدرج الرمادي
             gray = cv2.cvtColor(table_frame, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (7, 7), 1.5) # تعديل الفلتر لتحسين تباين الكرات
             
-            # 2. تحسين معايير رصد الدوائر لتشمل جميع الكرات وتتجاهل الضوضاء بالخارج
+            # فلتر ثنائي ذكي للقضاء تماماً على الظلال المتداخلة والدوائر الوهمية التي ظهرت في لقطة الشاشة
+            filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+            
+            # ضبط عتبة الحساسية الرياضية (param1 و param2) بدقة شديدة لمنع تكرار الدوائر العشوائية
             circles = cv2.HoughCircles(
-                blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=20,
-                param1=45, param2=22, minRadius=10, maxRadius=30
+                filtered, cv2.HOUGH_GRADIENT, dp=1, minDist=25,
+                param1=50, param2=32, minRadius=12, maxRadius=24
             )
 
-            # حساب مواقع الجيوب الستة ديناميكياً بناءً على أبعاد الطاولة المكتشفة تلقائياً
+            # توزيع الجيوب ديناميكياً على حواف مستطيل الطاولة المكتشف
             pockets = [
-                (table["left"] + 30, table["top"] + 30),                                # علوي يسار
-                (table["left"] + table["width"] // 2, table["top"] + 25),               # علوي وسط
-                (table["left"] + table["width"] - 30, table["top"] + 30),               # علوي يمين
-                (table["left"] + 30, table["top"] + table["height"] - 30),              # سفلي يسار
-                (table["left"] + table["width"] // 2, table["top"] + table["height"] - 25), # سفلي وسط
-                (table["left"] + table["width"] - 30, table["top"] + table["height"] - 30)  # سفلي يمين
+                (table["left"] + 25, table["top"] + 25),
+                (table["left"] + table["width"] // 2, table["top"] + 15),
+                (table["left"] + table["width"] - 25, table["top"] + 25),
+                (table["left"] + 25, table["top"] + table["height"] - 25),
+                (table["left"] + table["width"] // 2, table["top"] + table["height"] - 15),
+                (table["left"] + table["width"] - 25, table["top"] + table["height"] - 25)
             ]
 
-            # رسم الجيوب المكتشفة ديناميكياً
             for pocket in pockets:
-                pygame.draw.circle(screen, RED, pocket, 14, 2)
+                pygame.draw.circle(screen, RED, pocket, 15, 2)
 
             white_ball_center = None
             hovered_ball = None
-            detected_radius = 16 # نصف قطر افتراضي محسّن للعبة
+            detected_radius = 16 # حجم نصف القطر المثالي لكرات البلياردو على الشاشة
 
             if circles is not None:
                 circles = np.uint16(np.around(circles))
                 for i in circles[0, :]:
-                    # تحويل الإحداثيات من إحداثيات الجدول المقصوص إلى إحداثيات الشاشة الكاملة المطلقة
                     cx = int(i[0]) + table["left"]
                     cy = int(i[1]) + table["top"]
                     r = int(i[2])
@@ -159,6 +155,7 @@ def main():
                         detected_radius = r
                         pygame.draw.circle(screen, WHITE, ball_center, r, 2)
                     else:
+                        # رسم خط دائري نظيف ومفرد حول الكرات المرصودة فقط
                         pygame.draw.circle(screen, YELLOW, ball_center, r, 1)
 
                     if calculate_distance((mx, my), ball_center) <= r:
@@ -168,7 +165,7 @@ def main():
             if keyboard.is_pressed('z') and hovered_ball is not None:
                 locked_ball_center = hovered_ball
 
-            # 3. رسم خطوط التحليل والمحاكاة الاحترافية (مطابقة لـ Screenshot_18)
+            # الحسابات الفيزيائية الدقيقة ورسم خطوط المحاكاة
             if locked_ball_center:
                 best_pocket = None
                 min_distance = float('inf')
@@ -181,17 +178,17 @@ def main():
                 if best_pocket:
                     ghost_pos = get_ghost_ball_position(locked_ball_center, best_pocket, detected_radius)
                     
-                    # خط المسار المستهدف (أصفر) نحو البوكت
+                    # خط المسار المستهدف (الأصفر) من الكرة المحددة نحو البوكت
                     pygame.draw.line(screen, YELLOW, locked_ball_center, best_pocket, 3)
                     pygame.draw.circle(screen, YELLOW, locked_ball_center, detected_radius, 2)
 
-                    # خط التوجيه الأبيض من الكرة البيضاء الحقيقية إلى الـ Ghost Ball
+                    # خط التوجيه والـ Ghost Ball (الأبيض) الممتد من الكرة البيضاء الحقيقية
                     if white_ball_center:
                         pygame.draw.line(screen, WHITE, white_ball_center, ghost_pos, 2)
                         pygame.draw.circle(screen, WHITE, ghost_pos, detected_radius, 1)
                         pygame.draw.line(screen, WHITE, ghost_pos, locked_ball_center, 1)
                     
-                    info_text = f"Esports AI | Target Ball: {locked_ball_center} -> Pocket: {best_pocket}"
+                    info_text = f"Billiards AI | Target: {locked_ball_center} -> Pocket: {best_pocket}"
                     text_surface = font.render(info_text, True, YELLOW)
                     screen.blit(text_surface, (table["left"] + 10, table["top"] - 30 if table["top"] > 40 else 20))
 
