@@ -9,11 +9,11 @@ import math
 import keyboard
 import sys
 
-# إعداد أبعاد الشاشة بالكامل
+# إعداد أبعاد الشاشة بالكامل لتغطية اللعبة
 SCREEN_WIDTH = win32api.GetSystemMetrics(0)
 SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
-# تعريف الألوان (نستخدم اللون الأسود كلون شفاف للخلفية)
+# تعريف الألوان الأساسية للرسم
 TRANSPARENT_COLOR = (0, 0, 0)
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
@@ -36,30 +36,40 @@ def is_white_ball(roi):
     white_ratio = np.sum(mask == 255) / mask.size
     return white_ratio > 0.5
 
+def get_ghost_ball_position(target_ball, pocket, ball_radius):
+    """حساب نقطة التصادم التخيلية (Ghost Ball) بناءً على زاوية الهدف والجيب"""
+    dx = target_ball[0] - pocket[0]
+    dy = target_ball[1] - pocket[1]
+    distance = math.sqrt(dx**2 + dy**2)
+    if distance == 0:
+        return target_ball
+    
+    # نقطة التصادم تقع على نفس خط الامتداد وتبعد مسافة ضعف نصف القطر (قطر كامل) عن مركز الكرة المستهدفة
+    ratio = (distance + (ball_radius * 2)) / distance
+    ghost_x = pocket[0] + dx * ratio
+    ghost_y = pocket[1] + dy * ratio
+    return (int(ghost_x), int(ghost_y))
+
 def main():
     global locked_ball_center
     
-    # 1. إعداد نافذة PyGame الشفافة بالكامل
     pygame.init()
     pygame.font.init()
-    font = pygame.font.SysFont("Arial", 20, bold=True)
+    font = pygame.font.SysFont("Arial", 18, bold=True)
     
-    # إنشاء النافذة بأبعاد الشاشة الكاملة وبدون حواف
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME)
-    
-    # الحصول على مقبض النافذة (HWND) لضبط خصائص ويندوز المتقدمة
     hwnd = pygame.display.get_wm_info()['window']
     
-    # جعل النافذة عائمة فوق كل شيء (Always on Top) وشفافة وتمرر النقرات (Click-Through)
+    # ضبط خصائص النافذة لتصبح Overlay شفاف مئة بالمئة ويمرر الضغطات (Click-Through)
     styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     new_styles = styles | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, new_styles)
     
-    # تحديد اللون الأسود ليكون هو اللون الشفاف (أي شيء باللون الأسود لن يظهر وسيعرض اللعبة خلفه)
-    win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*TRANSPARENT_COLOR), 0, win32con.L_COLORKEY)
+    # تصحيح الخطأ: تم استبدال L_COLORKEY بـ LWA_COLORKEY المعتمد رسميًا في Win32
+    win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*TRANSPARENT_COLOR), 0, win32con.LWA_COLORKEY)
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
 
-    # إحداثيات الجيوب الستة الافتراضية لطاولتك (قم بتعديلها لتطابق أماكن الجيوب على شاشتك بدقة)
+    # إحداثيات الجيوب الستة الافتراضية لطاولتك (تعدل حسب اللعبة على الشاشة)
     pockets = [
         (100, 100),   (SCREEN_WIDTH // 2, 90),   (SCREEN_WIDTH - 100, 100),
         (100, SCREEN_HEIGHT - 100), (SCREEN_WIDTH // 2, SCREEN_HEIGHT - 90), (SCREEN_WIDTH - 100, SCREEN_HEIGHT - 100)
@@ -69,11 +79,8 @@ def main():
     monitor = {"top": 0, "left": 0, "width": SCREEN_WIDTH, "height": SCREEN_HEIGHT}
 
     with mss.mss() as sct:
-        print("[INFO] الـ Overlay الشفاف يعمل الآن مباشرة فوق اللعبة! اضغط Z لتحديد الكرة و Ctrl+Q للخروج.")
-        
         running = True
         while running:
-            # التعامل مع أحداث PyGame لمنع تجمّد الأداة
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -82,13 +89,10 @@ def main():
                 running = False
                 break
 
-            # تنظيف الشاشة بملئها باللون الشفاف (الأسود) في كل إطار
             screen.fill(TRANSPARENT_COLOR)
-
-            # الحصول على الإحداثيات الحية للماوس مباشرة من ويندوز
             mx, my = win32api.GetCursorPos()
 
-            # 2. التقاط الشاشة ومعالجتها برؤية حاسوبية فائقة السرعة في الخلفية
+            # التقاط الشاشة المباشر
             img = np.array(sct.grab(monitor))
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -99,12 +103,13 @@ def main():
                 param1=50, param2=25, minRadius=15, maxRadius=40
             )
 
-            # رسم الجيوب الستة للإرشاد كدوائر حمراء رقيقة مباشرة على الشاشة
+            # رسم الجيوب للإرشاد
             for pocket in pockets:
-                pygame.draw.circle(screen, RED, pocket, 18, 2)
+                pygame.draw.circle(screen, RED, pocket, 15, 2)
 
             white_ball_center = None
             hovered_ball = None
+            detected_radius = 20 # نصف قطر افتراضي في حال لم يتم الرصد فوراً
 
             if circles is not None:
                 circles = np.uint16(np.around(circles))
@@ -116,29 +121,24 @@ def main():
                     x1, x2 = max(0, cx-r), min(SCREEN_WIDTH, cx+r)
                     ball_roi = frame[y1:y2, x1:x2]
 
-                    # التعرف التلقائي على الكرة البيضاء ورسم دائرة بيضاء حولها مباشرة على شاشتك
                     if is_white_ball(ball_roi):
                         white_ball_center = ball_center
-                        pygame.draw.circle(screen, WHITE, ball_center, r, 3)
+                        detected_radius = r
+                        pygame.draw.circle(screen, WHITE, ball_center, r, 2)
                     else:
-                        # رسم دائرة صفراء خفيفة جداً حول بقية الكرات لرصد الأداة
-                        pygame.draw.circle(screen, YELLOW, ball_center, r,  1)
+                        pygame.draw.circle(screen, YELLOW, ball_center, r, 1)
 
-                    # فحص ما إذا كان ماوس اللاعب يقف فوق هذه الكرة حالياً
                     if calculate_distance((mx, my), ball_center) <= r:
                         hovered_ball = ball_center
                         pygame.draw.circle(screen, BLUE, ball_center, r + 4, 2)
 
-            # 3. ميزة زر الـ Z للتحكم وتثبيت الكرة المستهدفة
+            # ميزة التقاط الهدف بالماوس
             if keyboard.is_pressed('z') and hovered_ball is not None:
                 locked_ball_center = hovered_ball
 
-            # 4. الحساب الرياضي ورسم خط المسار النهائي فوق اللعبة بدون أي نوافذ
+            # محاكاة خطوط التحليل المتقدمة (مطابقة للصورة المرفقة)
             if locked_ball_center:
-                # رسم دائرة خضراء حول الكرة المستهدفة المقفلة
-                pygame.draw.circle(screen, GREEN, locked_ball_center, 22, 3)
-                
-                # البحث عن أسهل وأقرب جيب للكرة المقفلة
+                # 1. إيجاد أقرب جيب للكرة المستهدفة المقفلة
                 best_pocket = None
                 min_distance = float('inf')
                 for pocket in pockets:
@@ -148,21 +148,29 @@ def main():
                         best_pocket = pocket
 
                 if best_pocket:
-                    # رسم مسار الكرة إلى الجيب (خط أزرق سميك واحترافي مباشر على شاشتك)
-                    pygame.draw.line(screen, BLUE, locked_ball_center, best_pocket, 3)
+                    # 2. حساب موقع الـ Ghost Ball (كرة التصادم التخيلية)
+                    ghost_pos = get_ghost_ball_position(locked_ball_center, best_pocket, detected_radius)
                     
-                    # رسم خط الربط التكتيكي من الكرة البيضاء إلى الكرة المستهدفة
+                    # 3. رسم خط المسار النهائي من الكرة المستهدفة إلى الجيب باللون الأصفر
+                    pygame.draw.line(screen, YELLOW, locked_ball_center, best_pocket, 3)
+                    pygame.draw.circle(screen, YELLOW, locked_ball_center, detected_radius, 2)
+                    pygame.draw.circle(screen, YELLOW, best_pocket, 10, 2) # تبيين البوكت المستهدف
+
+                    # 4. رسم خط التوجيه الأبيض من الكرة البيضاء الحقيقية إلى موقع الـ Ghost Ball
                     if white_ball_center:
-                        pygame.draw.line(screen, WHITE, white_ball_center, locked_ball_center, 2)
-
-                    # كتابة البيانات التحليلية في زاوية الشاشة العلوية بشكل عائم ونظيف جداً
-                    info_text = f"AI Analysis -> Target Ball: {locked_ball_center} | Pocket: {best_pocket} | Distance: {int(min_distance)}px"
+                        pygame.draw.line(screen, WHITE, white_ball_center, ghost_pos, 2)
+                        # رسم دائرة بيضاء منقطة أو خفيفة تمثل الـ Ghost Ball قبل التصادم
+                        pygame.draw.circle(screen, WHITE, ghost_pos, detected_radius, 1)
+                        # خط ارتداد وهمي بسيط لإيضاح زاوية الانحراف
+                        pygame.draw.line(screen, WHITE, ghost_pos, locked_ball_center, 1)
+                    
+                    # عرض البيانات النصية البحثية بالأعلى
+                    info_text = f"Esports Tool | Target: {locked_ball_center} -> Pocket: {best_pocket} | Distance: {int(min_distance)}px"
                     text_surface = font.render(info_text, True, YELLOW)
-                    screen.blit(text_surface, (20, 20))
+                    screen.blit(text_surface, (25, 25))
 
-            # تحديث شاشة العرض العائمة
             pygame.display.update()
-            clock.tick(60) # تحديد معدل تحديث الأداة بـ 60 إطار في الثانية لضمان استقرار الأداء وسرعته
+            clock.tick(60)
 
     pygame.quit()
     sys.exit()
