@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest  # سيرفر ويندوز مخصص لبناء ملفات الـ EXE المتوافقة
+    runs-on: windows-latest  # بيئة ويندوز مخصصة لتجميع ملفات EXE المتوافقة
 
     steps:
     - name: Checkout code
@@ -22,17 +22,17 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        # تثبيت كافة المكتبات الأساسية ومكتبات التحكم بويندوز والأزرار التي أضفناها للكود
-        pip install opencv-python numpy mss pyinstaller keyboard pywin32
+        # تثبيت كافة المكتبات المطلوبة بما فيها PyGame للرسم الشفاف المباشر و مكتبات التحكم بويندوز
+        pip install opencv-python numpy mss pyinstaller keyboard pywin32 pygame
 
     - name: Build EXE
       run: |
-        # تحويل ملف ballpool.py إلى ملف تنفيذي واحد مدمج (--onefile)
-        # وإخفاء نافذة الدوس السوداء (--noconsole) ليعمل كـ Overlay احترافي
+        # تحويل السكربت إلى ملف تنفيذي واحد مدمج (--onefile) 
+        # وإلغاء نافذة الـ CMD السوداء المرافقة (--noconsole) ليعمل كـ Overlay سحري مخفي
         pyinstaller --onefile --noconsole ballpool.py
 
     - name: Upload Result
       uses: actions/upload-artifact@v4
       with:
-        name: Billiards-Tool-EXE
+        name: Billiards-Overlay-EXE
         path: dist/ballpool.exe
