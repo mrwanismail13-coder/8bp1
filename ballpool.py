@@ -13,7 +13,7 @@ import sys
 SCREEN_WIDTH = win32api.GetSystemMetrics(0)
 SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
-# الألوان المستخدمة في الرسم العائم
+# الألوان المستخدمة في الرسم
 TRANSPARENT_COLOR = (0, 0, 0)
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
@@ -21,9 +21,10 @@ GREEN = (0, 255, 0)
 BLUE = (0, 162, 232)
 YELLOW = (255, 242, 0)
 ORANGE = (255, 127, 39)
+PINK = (255, 0, 128) # لون مميز للمسار المتتالي الثاني
 
 locked_ball_center = None
-selected_pocket_index = None # لتخزين الجيب المختار يدوياً عبر الكيبورد
+selected_pocket_index = None
 
 def calculate_distance(p1, p2):
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
@@ -49,29 +50,48 @@ def get_ghost_ball_position(target_ball, pocket, ball_radius):
     ghost_y = pocket[1] + dy * ratio
     return (int(ghost_x), int(ghost_y))
 
-def is_line_blocked(p1, p2, obstacle_balls, current_radius):
-    """التحقق برمجياً مما إذا كان هناك كرة عائق تقطع المسار المستقيم بين نقطتين"""
+def check_ball_to_ball_collision(p1, p2, obstacle_balls, ball_radius):
+    """فحص ما إذا كان الخط الممتد يتقاطع مع أي كرة أخرى وإرجاع أول كرة يصطدم بها"""
+    first_collision_ball = None
+    min_dist_to_p1 = float('inf')
+    
     for ball in obstacle_balls:
-        # حساب المسافة العمودية من مركز كرة العائق إلى الخط المستقيم الممتد بين p1 و p2
         x0, y0 = ball
         x1, y1 = p1
         x2, y2 = p2
         
-        # تجنب القسمة على صفر إذا كانت النقاط متطابقة
         line_len = calculate_distance(p1, p2)
         if line_len == 0:
             continue
             
-        # حساب المسافة العمودية
         distance_to_line = abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / line_len
         
-        # التأكد من أن كرة العائق تقع 'بين' النقطتين وليس خلفهما على نفس الامتداد
         dot_product = (x0 - x1) * (x2 - x1) + (y0 - y1) * (y2 - y1)
         if dot_product >= 0 and dot_product <= line_len**2:
-            # إذا كانت المسافة العمودية أقل من قطر الكرة الكامل، فهذا يعني حدوث تصادم حتمي (عائق)
-            if distance_to_line < (current_radius * 2):
-                return True
-    return False
+            if distance_to_line < (ball_radius * 2):
+                dist_from_start = calculate_distance(p1, ball)
+                if dist_from_start < min_dist_to_p1:
+                    min_dist_to_p1 = dist_from_start
+                    first_collision_ball = ball
+                    
+    return first_collision_ball
+
+def calculate_reflection_vector(start_point, hit_ball, ball_radius):
+    """حساب زاوية الارتداد التكتيكية والمسار الجديد للكرة المضروبة الثانية"""
+    dx = hit_ball[0] - start_point[0]
+    dy = hit_ball[1] - start_point[1]
+    distance = math.sqrt(dx**2 + dy**2)
+    if distance == 0:
+        return hit_ball
+    
+    # اتجاه النقل الفيزيائي للطاقة يكون ممتداً من نقطة التلامس إلى مركز الكرة الثانية
+    nx = dx / distance
+    ny = dy / distance
+    
+    # مد خط المحاكاة لمسافة 250 بكسل تظهر اتجاه الحركة وقوتها
+    end_x = hit_ball[0] + nx * 250
+    end_y = hit_ball[1] + ny * 250
+    return (int(end_x), int(end_y))
 
 def detect_table_bounds(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -95,9 +115,10 @@ def main():
     pygame.init()
     pygame.font.init()
     font = pygame.font.SysFont("Arial", 18, bold=True)
-    pocket_font = pygame.font.SysFont("Arial", 22, bold=True) # خط كبير وواضح لأرقام الجيوب
+    pocket_font = pygame.font.SysFont("Arial", 22, bold=True)
     
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME)
+    # حل مشكلة الوميض: تفعيل العرض الثنائي الطبقة HWSURFACE و DOUBLEBUF لمنع الاهتزاز تماماً
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME | pygame.HWSURFACE | pygame.DOUBLEBUF)
     hwnd = pygame.display.get_wm_info()['window']
     
     styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
@@ -121,12 +142,10 @@ def main():
                 running = False
                 break
 
-            # الاستماع لأزرار الأرقام من 1 إلى 6 لتحديد الجيب يدوياً
             for n in range(1, 7):
                 if keyboard.is_pressed(str(n)):
-                    selected_pocket_index = n - 1 # تحويلها لفهرس مصفوفة (0 إلى 5)
+                    selected_pocket_index = n - 1
             
-            # إعادة التوجيه للوضع التلقائي عند ضغط مفتاح صفر '0'
             if keyboard.is_pressed('0'):
                 selected_pocket_index = None
 
@@ -150,26 +169,23 @@ def main():
                 param1=50, param2=32, minRadius=12, maxRadius=24
             )
 
-            # توزيع الجيوب الستة ديناميكياً على الطاولة
             pockets = [
-                (table["left"] + 25, table["top"] + 25),                       # 1: علوي يسار
-                (table["left"] + table["width"] // 2, table["top"] + 15),      # 2: علوي وسط
-                (table["left"] + table["width"] - 25, table["top"] + 25),      # 3: علوي يمين
-                (table["left"] + 25, table["top"] + table["height"] - 25),     # 4: سفلي يسار
-                (table["left"] + table["width"] // 2, table["top"] + table["height"] - 15), # 5: سفلي وسط
-                (table["left"] + table["width"] - 25, table["top"] + table["height"] - 25)  # 6: سفلي يمين
+                (table["left"] + 25, table["top"] + 25),
+                (table["left"] + table["width"] // 2, table["top"] + 15),
+                (table["left"] + table["width"] - 25, table["top"] + 25),
+                (table["left"] + 25, table["top"] + table["height"] - 25),
+                (table["left"] + table["width"] // 2, table["top"] + table["height"] - 15),
+                (table["left"] + table["width"] - 25, table["top"] + table["height"] - 25)
             ]
 
-            # رسم الجيوب الستة وترقيمها مباشرة على الشاشة
             for idx, pocket in enumerate(pockets):
                 pygame.draw.circle(screen, RED, pocket, 15, 2)
-                # عرض أرقام الجيوب (1-6) بلون برتقالي مميز بجانب كل جيب لسهولة التوجيه
                 p_text = pocket_font.render(str(idx + 1), True, ORANGE)
                 screen.blit(p_text, (pocket[0] - 8, pocket[1] - 35 if idx < 3 else pocket[1] + 15))
 
             white_ball_center = None
             hovered_ball = None
-            all_other_balls = [] # مصفوفة لتخزين مواقع الكرات الأخرى لفحص العوائق
+            all_other_balls = []
             detected_radius = 16
 
             if circles is not None:
@@ -190,7 +206,6 @@ def main():
                         pygame.draw.circle(screen, WHITE, ball_center, r, 2)
                     else:
                         pygame.draw.circle(screen, YELLOW, ball_center, r, 1)
-                        # إضافة الكرات الملونة العادية إلى قائمة فحص العوائق (باستثناء الكرة المستهدفة الحالية لاحقاً)
                         all_other_balls.append(ball_center)
 
                     if calculate_distance((mx, my), ball_center) <= r:
@@ -201,15 +216,13 @@ def main():
                 locked_ball_center = hovered_ball
 
             if locked_ball_center:
-                # تصفية الكرات العوائق لكي لا نعتبر الكرة المستهدفة نفسها عائقاً أمام مسارها
+                # تصفية الكرات لاستخراج قائمة العوائق الصالحة
                 obstacle_balls = [b for b in all_other_balls if b != locked_ball_center]
                 
-                # تحديد الجيب المستهدف (إما يدوياً بالرقم المكبوس، أو تلقائياً الأقرب)
                 best_pocket = None
                 if selected_pocket_index is not None and selected_pocket_index < len(pockets):
                     best_pocket = pockets[selected_pocket_index]
                 else:
-                    # الحساب التلقائي الافتراضي لأقرب جيب
                     min_distance = float('inf')
                     for pocket in pockets:
                         dist = calculate_distance(locked_ball_center, pocket)
@@ -220,37 +233,43 @@ def main():
                 if best_pocket:
                     ghost_pos = get_ghost_ball_position(locked_ball_center, best_pocket, detected_radius)
                     
-                    # خط المسار المستهدف من الكرة المحددة إلى الجيب (أصفر)
+                    # 1. رسم خط سير الكرة المستهدفة الأساسي للأمام (أصفر)
                     pygame.draw.line(screen, YELLOW, locked_ball_center, best_pocket, 3)
                     pygame.draw.circle(screen, YELLOW, locked_ball_center, detected_radius, 2)
 
-                    # خط التوجيه والـ Ghost Ball من الكرة البيضاء
                     if white_ball_center:
-                        # فحص العوائق: هل توجد أي كرة تقف حائلاً بين البيضاء وموقع الـ Ghost Ball؟
-                        blocked = is_line_blocked(white_ball_center, ghost_pos, obstacle_balls, detected_radius)
+                        # 2. فحص التصادم المتتالي بين الكرة البيضاء والـ Ghost Ball المحددة
+                        hit_obstacle = check_ball_to_ball_collision(white_ball_center, ghost_pos, obstacle_balls, detected_radius)
                         
-                        if blocked:
-                            # إذا وجد عائق، يتم صبغ الخط باللون الأحمر الناري للتحذير الهندسي
-                            pygame.draw.line(screen, RED, white_ball_center, ghost_pos, 3)
-                            pygame.draw.circle(screen, RED, ghost_pos, detected_radius, 2)
-                            status_text = "PATH BLOCKED! (عائق مكتشف)"
-                            text_color = RED
+                        if hit_obstacle:
+                            # [مسار متداخل / عائق]: ارسم الخط الأبيض حتى نقطة التصادم بالكرة العائق فقط
+                            pygame.draw.line(screen, RED, white_ball_center, hit_obstacle, 3)
+                            pygame.draw.circle(screen, RED, hit_obstacle, detected_radius, 2)
+                            
+                            # حساب المسار الانحرافي الجديد للكرة العائق التي تلقّت الصدمة (الكرة الثالثة)
+                            reflection_end = calculate_reflection_vector(white_ball_center, hit_obstacle, detected_radius)
+                            pygame.draw.line(screen, PINK, hit_obstacle, reflection_end, 2) # خط وردي يوضح حركتها الجديدة
+                            pygame.draw.circle(screen, PINK, reflection_end, 8, 1)
+                            
+                            status_text = "COMBO SHOT DETECTED! (تصادم متتالي)"
+                            text_color = ORANGE
                         else:
-                            # إذا كان المسار خالياً ونظيفاً، يُرسم باللون الأبيض المعتاد
+                            # [مسار مفتوح مباشر]: ارسم الخط الأبيض كاملاً ونظيفاً للـ Ghost ball المباشرة
                             pygame.draw.line(screen, WHITE, white_ball_center, ghost_pos, 2)
                             pygame.draw.circle(screen, WHITE, ghost_pos, detected_radius, 1)
-                            status_text = "CLEAR PATH (مسار مفتوح)"
+                            status_text = "DIRECT PATH CLEAR (مسار مباشر)"
                             text_color = GREEN
                             
                         pygame.draw.line(screen, WHITE, ghost_pos, locked_ball_center, 1)
                     
-                    # عرض البيانات النصية وحالة المسار في الأعلى
+                    # عرض الحالة على الشاشة
                     mode_text = f"Manual Pocket: {selected_pocket_index + 1}" if selected_pocket_index is not None else "Auto-Pocket"
-                    info_text = f"Billiards AI | Mode: {mode_text} | Status: {status_text}"
+                    info_text = f"Billiards Physics Engine | {mode_text} | {status_text}"
                     text_surface = font.render(info_text, True, text_color)
                     screen.blit(text_surface, (table["left"] + 10, table["top"] - 30 if table["top"] > 40 else 20))
 
-            pygame.display.update()
+            # تحديث الشاشة بتقنية الفليب السريع لمنع الوميض نهائياً
+            pygame.display.flip()
             clock.tick(60)
 
     pygame.quit()
