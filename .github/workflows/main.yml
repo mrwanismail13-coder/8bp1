@@ -1,4 +1,4 @@
-name: Build Browser to EXE
+name: Build Billiards Tool to EXE
 
 on:
   push:
@@ -31,5 +31,5 @@ jobs:
     - name: Upload Result
       uses: actions/upload-artifact@v4
       with:
-        name: Billiards-Pro-Overlay
+        name: Billiards-Combo-Overlay
         path: dist/ballpool.exe
