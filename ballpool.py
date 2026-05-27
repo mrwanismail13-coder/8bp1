@@ -3,13 +3,27 @@ import pygame.gfxdraw
 import win32gui
 import win32con
 import win32api
-import dxcam
 import cv2
 import numpy as np
 import math
 import sys
 import time
 import keyboard
+
+# =========================================
+# DXCAM / MSS FALLBACK
+# =========================================
+
+try:
+
+    import dxcam
+    DXCAM_AVAILABLE = True
+
+except:
+
+    DXCAM_AVAILABLE = False
+
+    import mss
 
 # =========================================
 # OpenCV Optimization
@@ -26,6 +40,10 @@ FPS = 240
 
 BALL_RADIUS = 16
 
+SMOOTH_WHITE = 0.35
+SMOOTH_GHOST = 0.22
+TRACK_SMOOTH = 0.35
+
 SCREEN_WIDTH = win32api.GetSystemMetrics(0)
 SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
@@ -41,9 +59,6 @@ ORANGE = (255, 165, 0)
 CYAN = (0, 220, 255)
 
 INNER_OFFSET = BALL_RADIUS + 10
-
-SMOOTH_WHITE = 0.35
-SMOOTH_GHOST = 0.22
 
 # =========================================
 # Variables
@@ -234,7 +249,7 @@ cached_text = font.render(
 )
 
 # =========================================
-# Overlay Settings
+# Overlay Setup
 # =========================================
 
 styles = win32gui.GetWindowLong(
@@ -260,17 +275,34 @@ win32gui.SetLayeredWindowAttributes(
 )
 
 # =========================================
-# DXCAM
+# Camera Setup
 # =========================================
 
-camera = dxcam.create(
-    output_color="BGR"
-)
+if DXCAM_AVAILABLE:
 
-camera.start(
-    target_fps=FPS,
-    video_mode=True
-)
+    camera = dxcam.create(
+        output_color="BGR"
+    )
+
+    camera.start(
+        target_fps=FPS,
+        video_mode=True
+    )
+
+else:
+
+    sct = mss.mss()
+
+    monitor = {
+        "top": 0,
+        "left": 0,
+        "width": SCREEN_WIDTH,
+        "height": SCREEN_HEIGHT
+    }
+
+# =========================================
+# Clock
+# =========================================
 
 clock = pygame.time.Clock()
 
@@ -304,7 +336,24 @@ while running:
         | win32con.SWP_NOACTIVATE
     )
 
-    frame = camera.get_latest_frame()
+    # =========================================
+    # Capture Frame
+    # =========================================
+
+    if DXCAM_AVAILABLE:
+
+        frame = camera.get_latest_frame()
+
+    else:
+
+        img = np.array(
+            sct.grab(monitor)
+        )
+
+        frame = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGRA2BGR
+        )
 
     if frame is None:
         continue
@@ -334,7 +383,7 @@ while running:
         continue
 
     # =========================================
-    # Inner Bands
+    # Bands
     # =========================================
 
     top_band = y + INNER_OFFSET
@@ -357,6 +406,10 @@ while running:
 
     scale = 1 / 0.75
 
+    # =========================================
+    # Preprocessing
+    # =========================================
+
     gray = cv2.cvtColor(
         small,
         cv2.COLOR_BGR2GRAY
@@ -375,6 +428,10 @@ while running:
         60,
         120
     )
+
+    # =========================================
+    # Detect Balls
+    # =========================================
 
     circles = cv2.HoughCircles(
         edges,
@@ -407,6 +464,10 @@ while running:
         (x + w // 2, y + h - 15),
         (x + w - 25, y + h - 25)
     ]
+
+    # =========================================
+    # Clear Screen
+    # =========================================
 
     screen.fill(TRANSPARENT)
 
@@ -454,7 +515,7 @@ while running:
         )
 
     # =========================================
-    # Ball Detection
+    # Process Circles
     # =========================================
 
     if circles is not None:
@@ -522,7 +583,7 @@ while running:
         )
 
     # =========================================
-    # Tracking Balls
+    # Ball Tracking
     # =========================================
 
     updated_balls = {}
@@ -550,8 +611,13 @@ while running:
 
                 old = tracked_balls[best_id]
 
-                nx = old[0] + (bx - old[0]) * 0.35
-                ny = old[1] + (by - old[1]) * 0.35
+                nx = old[0] + (
+                    bx - old[0]
+                ) * TRACK_SMOOTH
+
+                ny = old[1] + (
+                    by - old[1]
+                ) * TRACK_SMOOTH
 
                 updated_balls[best_id] = (
                     nx,
@@ -692,7 +758,7 @@ while running:
         )
 
         # =========================================
-        # Aim Line
+        # Main Aim Line
         # =========================================
 
         pygame.draw.line(
@@ -702,6 +768,10 @@ while running:
             ghost_pos,
             2
         )
+
+        # =========================================
+        # Pocket Line
+        # =========================================
 
         pygame.draw.line(
             screen,
@@ -713,6 +783,10 @@ while running:
             ),
             2
         )
+
+        # =========================================
+        # Ghost Ball
+        # =========================================
 
         aa_circle(
             screen,
@@ -732,8 +806,13 @@ while running:
 
         if dist > 0:
 
-            rx = lock_pos[0] + (dx / dist) * 300
-            ry = lock_pos[1] + (dy / dist) * 300
+            rx = lock_pos[0] + (
+                dx / dist
+            ) * 300
+
+            ry = lock_pos[1] + (
+                dy / dist
+            ) * 300
 
             pygame.draw.line(
                 screen,
@@ -755,13 +834,18 @@ while running:
         (x + 10, y - 30)
     )
 
+    # =========================================
+    # Update Display
+    # =========================================
+
     pygame.display.update()
 
 # =========================================
 # Exit
 # =========================================
 
-camera.stop()
+if DXCAM_AVAILABLE:
+    camera.stop()
 
 pygame.quit()
 
