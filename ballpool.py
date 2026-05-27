@@ -1,237 +1,768 @@
 import pygame
+import pygame.gfxdraw
 import win32gui
 import win32con
 import win32api
-import mss
+import dxcam
 import cv2
 import numpy as np
 import math
-import keyboard
 import sys
+import time
+import keyboard
 
-# الحصول على أبعاد الشاشة الحالية
+# =========================================
+# OpenCV Optimization
+# =========================================
+
+cv2.setUseOptimized(True)
+cv2.setNumThreads(0)
+
+# =========================================
+# Settings
+# =========================================
+
+FPS = 240
+
+BALL_RADIUS = 16
+
 SCREEN_WIDTH = win32api.GetSystemMetrics(0)
 SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
-# الألوان المستخدمة في الرسم
-TRANSPARENT_COLOR = (0, 0, 0)
+TRANSPARENT = (1, 1, 1)
+
 WHITE = (255, 255, 255)
+YELLOW = (255, 255, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 162, 232)
-YELLOW = (255, 242, 0)
-ORANGE = (255, 127, 39)
 PINK = (255, 0, 128)
+ORANGE = (255, 165, 0)
+CYAN = (0, 220, 255)
 
-# قائمة لتخزين الكرات المحددة بالترتيب (تسمح بتحديد كرتين أو أكثر)
-locked_balls = []
-selected_pocket_index = None
-last_z_state = False # لمنع التحديد المتكرر عند ضغطة زر واحدة
+INNER_OFFSET = BALL_RADIUS + 10
 
-def calculate_distance(p1, p2):
-    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+SMOOTH_WHITE = 0.35
+SMOOTH_GHOST = 0.22
+
+# =========================================
+# Variables
+# =========================================
+
+table_region = None
+
+locked_ball = None
+selected_pocket = None
+
+smooth_white = None
+smooth_ghost = None
+
+tracked_balls = {}
+next_ball_id = 0
+
+last_lock_time = 0
+
+# =========================================
+# Helper Functions
+# =========================================
+
+def distance(p1, p2):
+
+    return math.hypot(
+        p1[0] - p2[0],
+        p1[1] - p2[1]
+    )
+
+def smooth(current, previous, alpha):
+
+    if previous is None:
+        return current
+
+    return (
+        previous[0] + (current[0] - previous[0]) * alpha,
+        previous[1] + (current[1] - previous[1]) * alpha
+    )
+
+def aa_circle(surface, color, pos, radius):
+
+    pygame.gfxdraw.aacircle(
+        surface,
+        int(pos[0]),
+        int(pos[1]),
+        radius,
+        color
+    )
+
+def detect_table(frame):
+
+    hsv = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2HSV
+    )
+
+    lower = np.array([30, 40, 40])
+    upper = np.array([100, 255, 255])
+
+    mask = cv2.inRange(
+        hsv,
+        lower,
+        upper
+    )
+
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if contours:
+
+        largest = max(
+            contours,
+            key=cv2.contourArea
+        )
+
+        if cv2.contourArea(largest) > 40000:
+
+            x, y, w, h = cv2.boundingRect(largest)
+
+            return {
+                "left": x,
+                "top": y,
+                "width": w,
+                "height": h
+            }
+
+    return None
 
 def is_white_ball(roi):
+
     if roi is None or roi.size == 0:
         return False
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    lower_white = np.array([0, 0, 190])
-    upper_white = np.array([180, 45, 255])
-    mask = cv2.inRange(hsv, lower_white, upper_white)
+
+    hsv = cv2.cvtColor(
+        roi,
+        cv2.COLOR_BGR2HSV
+    )
+
+    lower = np.array([0, 0, 185])
+    upper = np.array([180, 45, 255])
+
+    mask = cv2.inRange(
+        hsv,
+        lower,
+        upper
+    )
+
     white_ratio = np.sum(mask == 255) / mask.size
-    return white_ratio > 0.50
 
-def get_ghost_ball_position(target_ball, pocket, ball_radius):
-    dx = target_ball[0] - pocket[0]
-    dy = target_ball[1] - pocket[1]
-    distance = math.sqrt(dx**2 + dy**2)
-    if distance == 0:
-        return target_ball
-    ratio = (distance + (ball_radius * 2)) / distance
-    ghost_x = pocket[0] + dx * ratio
-    ghost_y = pocket[1] + dy * ratio
-    return (int(ghost_x), int(ghost_y))
+    mean_bgr = cv2.mean(roi)[:3]
 
-def detect_table_bounds(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_table = np.array([35, 40, 40])
-    upper_table = np.array([130, 255, 255])
-    
-    mask = cv2.inRange(hsv, lower_table, upper_table)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if contours:
-        largest_contour = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest_contour) > 40000:
-            x, y, w, h = cv2.boundingRect(largest_contour)
-            return {"top": y, "left": x, "width": w, "height": h}
-            
-    return {"top": 0, "left": 0, "width": SCREEN_WIDTH, "height": SCREEN_HEIGHT}
+    b = mean_bgr[0]
+    g = mean_bgr[1]
+    r = mean_bgr[2]
 
-def main():
-    global locked_balls, selected_pocket_index, last_z_state
-    
-    pygame.init()
-    pygame.font.init()
-    font = pygame.font.SysFont("Arial", 18, bold=True)
-    pocket_font = pygame.font.SysFont("Arial", 22, bold=True)
-    
-    # نافذة مقاومة للوميض وثابتة تماماً بالاعتماد على كرت الشاشة
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME | pygame.HWSURFACE | pygame.DOUBLEBUF)
-    hwnd = pygame.display.get_wm_info()['window']
-    
-    styles = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-    new_styles = styles | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, new_styles)
-    
-    win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*TRANSPARENT_COLOR), 0, win32con.LWA_COLORKEY)
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+    brightness = (r + g + b) / 3
 
-    clock = pygame.time.Clock()
-    full_monitor = {"top": 0, "left": 0, "width": SCREEN_WIDTH, "height": SCREEN_HEIGHT}
+    balance = (
+        abs(r - g) < 18 and
+        abs(r - b) < 18 and
+        abs(g - b) < 18
+    )
 
-    with mss.mss() as sct:
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-            
-            if keyboard.is_pressed('ctrl+q'):
-                running = False
-                break
+    return (
+        white_ratio > 0.58
+        and balance
+        and brightness > 170
+    )
 
-            # أزرار اختيار الجيوب يدويًا
-            for n in range(1, 7):
-                if keyboard.is_pressed(str(n)):
-                    selected_pocket_index = n - 1
-            if keyboard.is_pressed('0'):
-                selected_pocket_index = None
+def ghost_ball(target, pocket, radius):
 
-            # زر X لتصفية الكرات المحددة وإعادة البدء
-            if keyboard.is_pressed('x'):
-                locked_balls.clear()
+    dx = target[0] - pocket[0]
+    dy = target[1] - pocket[1]
 
-            screen.fill(TRANSPARENT_COLOR)
-            mx, my = win32api.GetCursorPos()
+    dist = math.hypot(dx, dy)
 
-            full_img = np.array(sct.grab(full_monitor))
-            full_frame = cv2.cvtColor(full_img, cv2.COLOR_BGRA2BGR)
-            
-            table = detect_table_bounds(full_frame)
-            table_frame = full_frame[table["top"]:table["top"]+table["height"], table["left"]:table["left"]+table["width"]]
-            
-            if table_frame.size == 0:
+    if dist == 0:
+        return target
+
+    ratio = (dist + radius * 2) / dist
+
+    return (
+        pocket[0] + dx * ratio,
+        pocket[1] + dy * ratio
+    )
+
+# =========================================
+# Initialize Pygame
+# =========================================
+
+pygame.init()
+pygame.font.init()
+
+pygame.mouse.set_visible(False)
+
+pygame.event.set_allowed([
+    pygame.QUIT
+])
+
+screen = pygame.display.set_mode(
+    (SCREEN_WIDTH, SCREEN_HEIGHT),
+    pygame.NOFRAME |
+    pygame.HWSURFACE |
+    pygame.DOUBLEBUF
+)
+
+hwnd = pygame.display.get_wm_info()["window"]
+
+font = pygame.font.SysFont(
+    "Arial",
+    18,
+    bold=True
+)
+
+pocket_font = pygame.font.SysFont(
+    "Arial",
+    22,
+    bold=True
+)
+
+cached_text = font.render(
+    "Static AI Aim Assist",
+    True,
+    GREEN
+)
+
+# =========================================
+# Overlay Settings
+# =========================================
+
+styles = win32gui.GetWindowLong(
+    hwnd,
+    win32con.GWL_EXSTYLE
+)
+
+win32gui.SetWindowLong(
+    hwnd,
+    win32con.GWL_EXSTYLE,
+    styles
+    | win32con.WS_EX_LAYERED
+    | win32con.WS_EX_TRANSPARENT
+    | win32con.WS_EX_TOPMOST
+    | win32con.WS_EX_NOACTIVATE
+)
+
+win32gui.SetLayeredWindowAttributes(
+    hwnd,
+    win32api.RGB(*TRANSPARENT),
+    0,
+    win32con.LWA_COLORKEY
+)
+
+# =========================================
+# DXCAM
+# =========================================
+
+camera = dxcam.create(
+    output_color="BGR"
+)
+
+camera.start(
+    target_fps=FPS,
+    video_mode=True
+)
+
+clock = pygame.time.Clock()
+
+# =========================================
+# Main Loop
+# =========================================
+
+running = True
+
+while running:
+
+    clock.tick_busy_loop(FPS)
+
+    for event in pygame.event.get():
+
+        if event.type == pygame.QUIT:
+            running = False
+
+    if keyboard.is_pressed("ctrl+q"):
+        running = False
+
+    win32gui.SetWindowPos(
+        hwnd,
+        win32con.HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        win32con.SWP_NOMOVE
+        | win32con.SWP_NOSIZE
+        | win32con.SWP_NOACTIVATE
+    )
+
+    frame = camera.get_latest_frame()
+
+    if frame is None:
+        continue
+
+    # =========================================
+    # Detect Table
+    # =========================================
+
+    if table_region is None:
+
+        detected = detect_table(frame)
+
+        if detected:
+            table_region = detected
+
+    if table_region is None:
+        continue
+
+    x = table_region["left"]
+    y = table_region["top"]
+    w = table_region["width"]
+    h = table_region["height"]
+
+    table = frame[y:y+h, x:x+w]
+
+    if table.size == 0:
+        continue
+
+    # =========================================
+    # Inner Bands
+    # =========================================
+
+    top_band = y + INNER_OFFSET
+    bottom_band = y + h - INNER_OFFSET
+
+    left_band = x + INNER_OFFSET
+    right_band = x + w - INNER_OFFSET
+
+    # =========================================
+    # Resize
+    # =========================================
+
+    small = cv2.resize(
+        table,
+        None,
+        fx=0.75,
+        fy=0.75,
+        interpolation=cv2.INTER_LINEAR
+    )
+
+    scale = 1 / 0.75
+
+    gray = cv2.cvtColor(
+        small,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray = cv2.equalizeHist(gray)
+
+    gray = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
+    )
+
+    edges = cv2.Canny(
+        gray,
+        60,
+        120
+    )
+
+    circles = cv2.HoughCircles(
+        edges,
+        cv2.HOUGH_GRADIENT,
+        dp=1.3,
+        minDist=28,
+        param1=90,
+        param2=24,
+        minRadius=7,
+        maxRadius=15
+    )
+
+    raw_white = None
+    raw_targets = []
+
+    try:
+        mx, my = win32api.GetCursorPos()
+    except:
+        mx, my = (0, 0)
+
+    hovered_ball = None
+
+    pockets = [
+
+        (x + 25, y + 25),
+        (x + w // 2, y + 15),
+        (x + w - 25, y + 25),
+
+        (x + 25, y + h - 25),
+        (x + w // 2, y + h - 15),
+        (x + w - 25, y + h - 25)
+    ]
+
+    screen.fill(TRANSPARENT)
+
+    # =========================================
+    # Draw Bands
+    # =========================================
+
+    pygame.draw.rect(
+        screen,
+        CYAN,
+        (
+            left_band,
+            top_band,
+            right_band - left_band,
+            bottom_band - top_band
+        ),
+        2
+    )
+
+    # =========================================
+    # Draw Pockets
+    # =========================================
+
+    for idx, p in enumerate(pockets):
+
+        aa_circle(
+            screen,
+            RED,
+            p,
+            14
+        )
+
+        txt = pocket_font.render(
+            str(idx + 1),
+            True,
+            ORANGE
+        )
+
+        screen.blit(
+            txt,
+            (
+                p[0] - 8,
+                p[1] - 35 if idx < 3 else p[1] + 15
+            )
+        )
+
+    # =========================================
+    # Ball Detection
+    # =========================================
+
+    if circles is not None:
+
+        circles = np.round(
+            circles[0, :]
+        ).astype("int")
+
+        for (cx, cy, r) in circles:
+
+            cx = int(cx * scale + x)
+            cy = int(cy * scale + y)
+            r = int(r * scale)
+
+            ignore = False
+
+            for p in pockets:
+
+                if distance((cx, cy), p) < 35:
+                    ignore = True
+                    break
+
+            if ignore:
                 continue
 
-            gray = cv2.cvtColor(table_frame, cv2.COLOR_BGR2GRAY)
-            filtered = cv2.bilateralFilter(gray, 9, 75, 75)
-            
-            circles = cv2.HoughCircles(
-                filtered, cv2.HOUGH_GRADIENT, dp=1, minDist=25,
-                param1=50, param2=32, minRadius=12, maxRadius=24
+            pad = 3
+
+            x1 = max(0, cx - x - r - pad)
+            y1 = max(0, cy - y - r - pad)
+
+            x2 = min(w, cx - x + r + pad)
+            y2 = min(h, cy - y + r + pad)
+
+            roi = table[y1:y2, x1:x2]
+
+            if is_white_ball(roi):
+
+                raw_white = (cx, cy)
+
+            else:
+
+                raw_targets.append((cx, cy))
+
+            if distance((mx, my), (cx, cy)) < r + 8:
+
+                hovered_ball = (cx, cy)
+
+    # =========================================
+    # White Ball
+    # =========================================
+
+    if raw_white:
+
+        smooth_white = smooth(
+            raw_white,
+            smooth_white,
+            SMOOTH_WHITE
+        )
+
+        aa_circle(
+            screen,
+            WHITE,
+            smooth_white,
+            BALL_RADIUS
+        )
+
+    # =========================================
+    # Tracking Balls
+    # =========================================
+
+    updated_balls = {}
+
+    if len(raw_targets) > 0:
+
+        for bx, by in raw_targets:
+
+            best_id = None
+            best_dist = 999999
+
+            for ball_id, old_pos in tracked_balls.items():
+
+                d = distance(
+                    (bx, by),
+                    old_pos
+                )
+
+                if d < best_dist and d < 35:
+
+                    best_dist = d
+                    best_id = ball_id
+
+            if best_id is not None:
+
+                old = tracked_balls[best_id]
+
+                nx = old[0] + (bx - old[0]) * 0.35
+                ny = old[1] + (by - old[1]) * 0.35
+
+                updated_balls[best_id] = (
+                    nx,
+                    ny
+                )
+
+            else:
+
+                updated_balls[next_ball_id] = (
+                    bx,
+                    by
+                )
+
+                next_ball_id += 1
+
+    tracked_balls = updated_balls
+
+    # =========================================
+    # Draw Balls
+    # =========================================
+
+    for ball_id, sb in tracked_balls.items():
+
+        color = YELLOW
+
+        if locked_ball:
+
+            if distance(sb, locked_ball) < 10:
+                color = BLUE
+
+        aa_circle(
+            screen,
+            color,
+            sb,
+            BALL_RADIUS
+        )
+
+    # =========================================
+    # Lock Ball
+    # =========================================
+
+    if keyboard.is_pressed("z"):
+
+        current_time = time.time()
+
+        if current_time - last_lock_time > 0.25:
+
+            if hovered_ball and len(tracked_balls) > 0:
+
+                locked_ball = min(
+                    tracked_balls.values(),
+                    key=lambda b: distance(
+                        b,
+                        hovered_ball
+                    )
+                )
+
+                last_lock_time = current_time
+
+    # =========================================
+    # Unlock Ball
+    # =========================================
+
+    if keyboard.is_pressed("x"):
+
+        locked_ball = None
+
+    # =========================================
+    # Pocket Selection
+    # =========================================
+
+    if keyboard.is_pressed("1"):
+        selected_pocket = 0
+
+    elif keyboard.is_pressed("2"):
+        selected_pocket = 1
+
+    elif keyboard.is_pressed("3"):
+        selected_pocket = 2
+
+    elif keyboard.is_pressed("4"):
+        selected_pocket = 3
+
+    elif keyboard.is_pressed("5"):
+        selected_pocket = 4
+
+    elif keyboard.is_pressed("6"):
+        selected_pocket = 5
+
+    elif keyboard.is_pressed("0"):
+        selected_pocket = None
+
+    # =========================================
+    # Aim System
+    # =========================================
+
+    if smooth_white and locked_ball:
+
+        if selected_pocket is not None:
+
+            target_pocket = pockets[selected_pocket]
+
+        else:
+
+            target_pocket = min(
+                pockets,
+                key=lambda p: distance(
+                    locked_ball,
+                    p
+                )
             )
 
-            pockets = [
-                (table["left"] + 25, table["top"] + 25),
-                (table["left"] + table["width"] // 2, table["top"] + 15),
-                (table["left"] + table["width"] - 25, table["top"] + 25),
-                (table["left"] + 25, table["top"] + table["height"] - 25),
-                (table["left"] + table["width"] // 2, table["top"] + table["height"] - 15),
-                (table["left"] + table["width"] - 25, table["top"] + table["height"] - 25)
-            ]
+        gp = ghost_ball(
+            locked_ball,
+            target_pocket,
+            BALL_RADIUS
+        )
 
-            # رسم الجيوب وترقيمها
-            for idx, pocket in enumerate(pockets):
-                pygame.draw.circle(screen, RED, pocket, 15, 2)
-                p_text = pocket_font.render(str(idx + 1), True, ORANGE)
-                screen.blit(p_text, (pocket[0] - 8, pocket[1] - 35 if idx < 3 else pocket[1] + 15))
+        smooth_ghost = smooth(
+            gp,
+            smooth_ghost,
+            SMOOTH_GHOST
+        )
 
-            white_ball_center = None
-            hovered_ball = None
-            detected_radius = 16
+        white_pos = (
+            int(smooth_white[0]),
+            int(smooth_white[1])
+        )
 
-            if circles is not None:
-                circles = np.uint16(np.around(circles))
-                for i in circles[0, :]:
-                    cx = int(i[0]) + table["left"]
-                    cy = int(i[1]) + table["top"]
-                    r = int(i[2])
-                    ball_center = (cx, cy)
+        ghost_pos = (
+            int(smooth_ghost[0]),
+            int(smooth_ghost[1])
+        )
 
-                    y1, y2 = max(0, int(i[1])-r), min(table["height"], int(i[1])+r)
-                    x1, x2 = max(0, int(i[0])-r), min(table["width"], int(i[0])+r)
-                    ball_roi = table_frame[y1:y2, x1:x2]
+        lock_pos = (
+            int(locked_ball[0]),
+            int(locked_ball[1])
+        )
 
-                    if is_white_ball(ball_roi):
-                        white_ball_center = ball_center
-                        detected_radius = r
-                        pygame.draw.circle(screen, WHITE, ball_center, r, 2)
-                    else:
-                        # تلوين الكرات المحددة مسبقاً بلون أزرق لتميزها عن البقية
-                        if ball_center in locked_balls:
-                            pygame.draw.circle(screen, BLUE, ball_center, r, 2)
-                        else:
-                            pygame.draw.circle(screen, YELLOW, ball_center, r, 1)
+        # =========================================
+        # Aim Line
+        # =========================================
 
-                    if calculate_distance((mx, my), ball_center) <= r:
-                        hovered_ball = ball_center
-                        pygame.draw.circle(screen, BLUE, ball_center, r + 4, 2)
+        pygame.draw.line(
+            screen,
+            WHITE,
+            white_pos,
+            ghost_pos,
+            2
+        )
 
-            # آلية التقاط الكرات المتعددة الذكية بدون تكرار عند الضغط المطول
-            z_pressed = keyboard.is_pressed('z')
-            if z_pressed and not last_z_state and hovered_ball is not None:
-                if hovered_ball not in locked_balls and hovered_ball != white_ball_center:
-                    # إضافة الكرة المحددة إلى قائمة الكرات المخططة
-                    locked_balls.append(hovered_ball)
-            last_z_state = z_pressed
+        pygame.draw.line(
+            screen,
+            YELLOW,
+            lock_pos,
+            (
+                int(target_pocket[0]),
+                int(target_pocket[1])
+            ),
+            2
+        )
 
-            # هندسة رسم المسارات المتسلسلة (Combo / Plant Shot)
-            if len(locked_balls) > 0:
-                # 1. إيصال الخط الأبيض من الكرة البيضاء إلى الكرة الأولى المحددة
-                if white_ball_center:
-                    pygame.draw.line(screen, WHITE, white_ball_center, locked_balls[0], 2)
-                    pygame.draw.circle(screen, WHITE, locked_balls[0], detected_radius + 2, 1)
+        aa_circle(
+            screen,
+            WHITE,
+            ghost_pos,
+            BALL_RADIUS
+        )
 
-                # 2. رسم الخطوط بين الكرات المحددة المتتالية (من منتصف الكرة إلى منتصف الكرة الأخرى)
-                if len(locked_balls) > 1:
-                    for idx in range(len(locked_balls) - 1):
-                        pygame.draw.line(screen, BLUE, locked_balls[idx], locked_balls[idx+1], 2)
-                        pygame.draw.circle(screen, BLUE, locked_balls[idx+1], detected_radius + 2, 1)
+        # =========================================
+        # Reflection Line
+        # =========================================
 
-                # 3. حساب المسار من الكرة الأخيرة إلى الجيب المستهدف
-                last_ball = locked_balls[-1]
-                best_pocket = None
-                
-                if selected_pocket_index is not None and selected_pocket_index < len(pockets):
-                    best_pocket = pockets[selected_pocket_index]
-                else:
-                    min_distance = float('inf')
-                    for pocket in pockets:
-                        dist = calculate_distance(last_ball, pocket)
-                        if dist < min_distance:
-                            min_distance = dist
-                            best_pocket = pocket
+        dx = lock_pos[0] - ghost_pos[0]
+        dy = lock_pos[1] - ghost_pos[1]
 
-                if best_pocket:
-                    # حساب الـ Ghost Ball للكرة الأخيرة مع الجيب المختار
-                    ghost_pos = get_ghost_ball_position(last_ball, best_pocket, detected_radius)
-                    
-                    # خط المسار النهائي من الكرة الأخيرة المحددة نحو البوكت (أصفر)
-                    pygame.draw.line(screen, YELLOW, last_ball, best_pocket, 3)
-                    pygame.draw.circle(screen, YELLOW, last_ball, detected_radius, 2)
-                    pygame.draw.circle(screen, YELLOW, ghost_pos, detected_radius, 1)
+        dist = math.hypot(dx, dy)
 
-                # عرض نص الإرشادات في الأعلى
-                info_text = f"Combo Mode: Locked {len(locked_balls)} Balls | Press 'X' to Reset Target"
-                text_surface = font.render(info_text, True, GREEN)
-                screen.blit(text_surface, (table["left"] + 10, table["top"] - 30 if table["top"] > 40 else 20))
+        if dist > 0:
 
-            pygame.display.flip()
-            clock.tick(60)
+            rx = lock_pos[0] + (dx / dist) * 300
+            ry = lock_pos[1] + (dy / dist) * 300
 
-    pygame.quit()
-    sys.exit()
+            pygame.draw.line(
+                screen,
+                PINK,
+                lock_pos,
+                (
+                    int(rx),
+                    int(ry)
+                ),
+                2
+            )
 
-if __name__ == "__main__":
-    main()
+    # =========================================
+    # Text
+    # =========================================
+
+    screen.blit(
+        cached_text,
+        (x + 10, y - 30)
+    )
+
+    pygame.display.update()
+
+# =========================================
+# Exit
+# =========================================
+
+camera.stop()
+
+pygame.quit()
+
+sys.exit()
